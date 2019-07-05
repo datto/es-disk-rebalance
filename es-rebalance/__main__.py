@@ -1,20 +1,12 @@
 
+from collections import namedtuple
 from elasticsearch6 import Elasticsearch
 import argparse
-import re
-from collections import namedtuple
+import json
+import pprint
 
-Shard = namedtuple("Shard", [
-	"index_name",
-	"shard_id",
-	"is_primary",
-	"status",
-	"num_docs",
-	"size",
-	"node_ip",
-	"node_host",
-])
-SHARD_RE = re.compile(r"^([^ ]+) +([0-9]+) +([pr]) +([^ ]+) +([0-9]+) +([0-9]+\.?[0-9]*[a-z]*) +([^ ]+) +([^\s]+)\s*$")
+from .allocation_info import get_allocation_info
+from .shards import get_shards
 
 def main():
 	parser = argparse.ArgumentParser(description="")
@@ -25,27 +17,20 @@ def main():
 	
 	es = Elasticsearch(args.url)
 	
-	shards = []
-	for line in es.cat.shards().splitlines():
-		match = SHARD_RE.match(line)
-		shards.append(Shard(
-			match.group(1),
-			int(match.group(2)),
-			match.group(3) == "p",
-			match.group(4),
-			int(match.group(5)),
-			match.group(6),
-			match.group(7),
-			match.group(8),
-		))
+	shards = list(get_shards(es))
 	
 	if not shards:
 		print("No shards found.")
 		return
 	
-	shards.sort(key = lambda shard: (shard.name, shard.unknown_int, shard.is_primary))
+	shards.sort(key = lambda shard: (shard.index_name, shard.shard_id, shard.is_primary))
 	for shard in shards:
 		print(shard)
+	
+	allocation_info = list(get_allocation_info(es))
+	allocation_info.sort(key=lambda n: n.node_host)
+	for info in allocation_info:
+		print(info)
 
 if __name__ == "__main__":
 	main()
