@@ -8,6 +8,17 @@ import pprint
 from .allocation_info import get_allocation_info
 from .shards import get_shards
 
+class NodeAlloc:
+	def __init__(self, name, ip, rack):
+		self.name = name
+		self.ip = ip
+		self.rack = rack
+		self.shards = []
+	
+	def planned_used_size(self):
+		return sum(shard.size for shard in self.shards)
+	
+
 def main():
 	parser = argparse.ArgumentParser(description="")
 	parser.add_argument("-u", "--url", required=True, action="append",
@@ -31,6 +42,8 @@ def main():
 	allocation_info.sort(key=lambda n: n.node_host)
 	for info in allocation_info:
 		print(info)
+	
+	
 
 if __name__ == "__main__":
 	main()
