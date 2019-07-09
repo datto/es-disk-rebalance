@@ -95,14 +95,14 @@ class Plan:
 		"Yields shards that ought to be moved, in decreasing priority"
 		for node in self.nodes_by_size:
 			for shard in node.shards:
-				if shard in self.moved_shards:
+				if (shard.index, shard.shard) in self.moved_shards:
 					continue
 				yield node, shard
 	
 	def find_small_shards(self):
 		for node in reversed(self.nodes_by_size):
 			for shard in reversed(node.shards):
-				if shard in self.moved_shards:
+				if (shard.index, shard.shard) in self.moved_shards:
 					continue
 				yield node, shard
 	
@@ -171,8 +171,8 @@ class Plan:
 		node1.shards.append(node2_shard)
 		node2.shards.remove(node2_shard)
 		node2.shards.append(node1_shard)
-		self.moved_shards.add(node1_shard)
-		self.moved_shards.add(node2_shard)
+		self.moved_shards.add((node1_shard.index, node1_shard.shard))
+		self.moved_shards.add((node2_shard.index, node2_shard.shard))
 		self._sort()
 	
 	def percent_used_variance(self, exclude_shards=[], include_shards=[]):
