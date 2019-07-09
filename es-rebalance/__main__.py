@@ -107,6 +107,9 @@ class Plan:
 				yield node, shard
 	
 	def can_exchange_shards(self, node1, node1_shard, node2, node2_shard):
+		if node1 is node2:
+			return False
+		
 		# Will the shards fit?
 		node1_used = sum((shard.store if shard is not node1_shard else 0) for shard in node1.shards) \
 			+ node2_shard.store
