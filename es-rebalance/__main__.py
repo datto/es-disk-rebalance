@@ -2,7 +2,6 @@
 from collections import namedtuple
 from elasticsearch6 import Elasticsearch
 from elasticsearch6.exceptions import TransportError
-from sortedcontainers import SortedSet
 import argparse
 import json
 import logging

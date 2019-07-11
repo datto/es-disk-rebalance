@@ -7,7 +7,6 @@ verify_ssl = true
 
 [packages]
 elasticsearch6 = "<7.0.0,>=6.0.0"
-sortedcontainers = "*"
 
 [requires]
 python_version = "3.6"
