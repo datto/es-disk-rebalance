@@ -12,13 +12,24 @@ import statistics
 
 LOG = logging.getLogger(__name__)
 
-NodeInfo = namedtuple("NodeInfo", [
-	"name",
-	"ip",
-	"rack",
-	"capacity",
-	"shards",
-])
+class NodeInfo:
+	def __init__(self, name, ip, rack, capacity, shards):
+		self.name = name
+		self.ip = ip
+		self.rack = rack
+		self.capacity = capacity
+		self.shards = shards
+		self.used = None
+		self.resort()
+	
+	@property
+	def fraction_used(self):
+		return self.used / self.capacity
+	
+	def resort(self):
+		self.shards.sort(key=lambda shard: shard.store, reverse=True)
+		self.used = sum(shard.store for shard in self.shards)
+
 Shard = namedtuple("Shard", [
 	"index",
 	"shard",
@@ -29,7 +40,7 @@ Shard = namedtuple("Shard", [
 
 RELOCATING_RE = re.compile(r"^([^ ]+) -> [^ ]+ [^ ]+ ([^ ]+)$")
 
-def formate_bytes(num_bytes):
+def format_bytes(num_bytes):
 	if num_bytes >= 1024*1024*1024*1024:
 		return "%.2fTiB" % (num_bytes / (1024*1024*1024*1024))
 	if num_bytes >= 1024*1024*1024:
@@ -41,9 +52,10 @@ def formate_bytes(num_bytes):
 	return "%dB" % num_bytes
 
 class Plan:
-	def __init__(self, es, box_type, size_percent_threshold):
+	def __init__(self, es, box_type, shard_percentage_threshold, node_percentage_threshold):
 		self.es = es
-		self.size_fraction_threshold = 1 - size_percent_threshold / 100
+		self.shard_fraction_threshold = 1 - shard_percentage_threshold / 100
+		self.node_fraction_threshold = node_percentage_threshold / 100
 		raw_alloc_infos = es.cat.allocation(format="json", bytes="b")
 		raw_shards = es.cat.shards(format="json", bytes="b")
 		raw_nodes = dict((node["name"], node) for node in es.nodes.info(format="json")["nodes"].values())
@@ -90,21 +102,17 @@ class Plan:
 		self._sort()
 	
 	def _sort(self):
-		self.nodes_by_size.sort(
-			key=lambda node: sum(shard.store for shard in node.shards) / node.capacity,
-			reverse=True)
 		for node in self.nodes_by_size:
-			node.shards.sort(key=lambda shard: shard.store, reverse=True)
-		#self.shards_by_size = sorted(
-		#	((host, shard) for host in self.nodes_by_size for shard in host.shards),
-		#	key=lambda tup: tup[1].store
-		#)
+			node.resort()
+		self.nodes_by_size.sort(
+			key=lambda node: node.used / node.capacity,
+			reverse=True)
 	
 	def plan_step(self):
 		current_pvariance = self.percent_used_variance()
 		
 		for big_node, big_shard in self.find_big_shards():
-			for small_node, small_shard in self.find_small_shards():
+			for small_node, small_shard in self.find_small_shards(big_node):
 				if small_shard.store >= big_shard.store:
 					continue
 				
@@ -114,7 +122,7 @@ class Plan:
 				
 				# Make sure moving this actually makes things more even
 				exchanged_pvariance = self.percent_used_variance(
-					exclude_shards=(big_shard, small_shard),
+					exclude_shards=((big_node, big_shard), (small_node, small_shard)),
 					include_shards=((small_node, big_shard), (big_node, small_shard)),
 				)
 				if exchanged_pvariance >= current_pvariance:
@@ -127,6 +135,11 @@ class Plan:
 	def find_big_shards(self):
 		"Yields shards that ought to be moved, in decreasing priority"
 		for node in self.nodes_by_size:
+			if abs(self.nodes_by_size[-1].fraction_used - node.fraction_used) < self.node_fraction_threshold:
+				# Big node has a similar percent used than all of the smaller nodes, so there's
+				# no way we can exchange anything. Stop.
+				break
+			
 			for shard in node.shards:
 				if (shard.index, shard.shard) in self.moved_shards:
 					continue
@@ -134,8 +147,13 @@ class Plan:
 					continue
 				yield node, shard
 	
-	def find_small_shards(self):
+	def find_small_shards(self, big_node):
 		for node in reversed(self.nodes_by_size):
+			if node is big_node:
+				# We've met up with the big node. All other nodes will be bigger than it,
+				# so there's no point in continuing
+				break
+			
 			for shard in reversed(node.shards):
 				if (shard.index, shard.shard) in self.moved_shards:
 					continue
@@ -152,22 +170,23 @@ class Plan:
 			size_fraction = node2_shard.store / node1_shard.store
 		else:
 			size_fraction = node1_shard.store / node2_shard.store
-		if size_fraction > self.size_fraction_threshold:
+		if size_fraction > self.shard_fraction_threshold:
 			LOG.debug("Not worth swapping: shard %s/%s/%s (%s) with shard %s/%s/%s (%s)",
 				node1_shard.index, node1_shard.shard, node1_shard.prirep,
-				formate_bytes(node1_shard.store),
+				format_bytes(node1_shard.store),
 				node2_shard.index, node2_shard.shard, node2_shard.prirep,
-				formate_bytes(node2_shard.store),
+				format_bytes(node2_shard.store),
 			)
 			return False
 		
+		# Are the two nodes too similar in disk utilization?
+		if abs(node1.used / node1.capacity - node2.used / node2.capacity) < self.node_fraction_threshold:
+			return False
+		
 		# Will the shards fit?
-		node1_used = sum(shard.store for shard in node1.shards) \
-			+ node2_shard.store
-		node2_used = sum(shard.store for shard in node2.shards) \
-			+ node1_shard.store
-		if node1_used > node1.capacity or node2_used > node2.capacity:
-			LOG.debug("Too big: %d >? {} and/or %d >? %d", node1_used, node1.capacity, node2_used, node2.capacity)
+		if node1.used + node2_shard.store > node1.capacity or node2.used + node1_shard.store > node2.capacity:
+			LOG.debug("Too big: %d >? {} and/or %d >? %d",
+				node1.used + node2_shard.store, node1.capacity, node2.used + node1_shard.store, node2.capacity)
 			return False
 		
 		# Check if node1_shard can be moved to node2 without violating the one shard per rack rule
@@ -213,9 +232,9 @@ class Plan:
 	
 	def plan_exchange(self, node1, node1_shard, node2, node2_shard):
 		LOG.info("Exchanging shard %s/%s/%s (%s) on node %s (%.2f%%) with %s/%s/%s (%s) on node %s (%.2f%%)",
-			node1_shard.index, node1_shard.shard, node1_shard.prirep, formate_bytes(node1_shard.store),
+			node1_shard.index, node1_shard.shard, node1_shard.prirep, format_bytes(node1_shard.store),
 			node1.name, sum(node.store for node in node1.shards) * 100 / node1.capacity,
-			node2_shard.index, node2_shard.shard, node2_shard.prirep, formate_bytes(node2_shard.store),
+			node2_shard.index, node2_shard.shard, node2_shard.prirep, format_bytes(node2_shard.store),
 			node2.name, sum(node.store for node in node2.shards) * 100 / node2.capacity,
 		)
 		
@@ -251,10 +270,14 @@ class Plan:
 		configuration is better without actually committing to it
 		"""
 		def percentage(node):
-			the_sum = sum((shard.store if shard not in exclude_shards else 0) for shard in node.shards)
+			the_sum = node.used
+			for exclude_node, exclude_shard in exclude_shards:
+				if exclude_node is node:
+					the_sum -= exclude_shard.store
 			for include_node, include_shard in include_shards:
 				if include_node is node:
 					the_sum += include_shard.store
+			
 			return the_sum / node.capacity
 		return statistics.pvariance(percentage(node) for node in self.nodes_by_size)
 	
@@ -275,8 +298,10 @@ def main():
 		help="Box type of nodes to rebalance. One of 'cold' or 'hot'")
 	parser.add_argument("-i", "--iterations", type=int, default=10,
 		help="Number of shards to exchange")
-	parser.add_argument("-p", "--size-percentage", type=float, default=90,
+	parser.add_argument("-p", "--shard-percentage", type=float, default=90,
 		help="Reject exchanges of shards whose sizes are within this percent of each other, to avoid swapping large shards around.")
+	parser.add_argument("-P", "--node-percentage", type=float, default=10,
+		help="Don't exchange between nodes that are within this many percentage points of each other")
 	parser.add_argument("-v", "--verbose", action="store_true",
 		help="Print debug logs")
 	parser.add_argument("--execute", action="store_true",
@@ -290,7 +315,7 @@ def main():
 	
 	es = Elasticsearch(args.url)
 	
-	plan = Plan(es, args.box_type, args.size_percentage)
+	plan = Plan(es, args.box_type, args.shard_percentage, args.node_percentage)
 	for i in range(args.iterations):
 		if not plan.plan_step():
 			LOG.warn("Could not move anything, stopping early after %d iteration(s)", i+1)
