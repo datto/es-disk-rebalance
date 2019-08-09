@@ -8,7 +8,7 @@ setup(
 	url="",
 	author="Alex Parrill",
 	author_email="aparrill@datto.com",
-	license="",
+	license="MIT",
 	packages=["es_rebalance"],
 	zip_safe=False,
 	entry_points={

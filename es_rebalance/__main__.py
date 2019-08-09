@@ -12,20 +12,35 @@ import statistics
 LOG = logging.getLogger(__name__)
 
 class NodeInfo:
+	"""
+	Info about an ES node
+	"""
 	def __init__(self, name, ip, rack, capacity, shards):
+		# Immutable properties
 		self.name = name
 		self.ip = ip
 		self.rack = rack
 		self.capacity = capacity
+		
+		# Mutable properties
+		# `shards` and `used` are updated during planning.
+		# `shards` is sorted by size (store)
 		self.shards = shards
 		self.used = None
 		self.resort()
 	
 	@property
 	def fraction_used(self):
+		"""
+		Computes the fractional disk usage - a float ranging from 0 to 1 with 0 being
+		empty and 1 being full.
+		"""
 		return self.used / self.capacity
 	
 	def resort(self):
+		"""
+		Sorts the `shards` list by size and updates `used`. Call after modifying `shards`.
+		"""
 		self.shards.sort(key=lambda shard: shard.store, reverse=True)
 		self.used = sum(shard.store for shard in self.shards)
 
@@ -37,9 +52,13 @@ Shard = namedtuple("Shard", [
 	"can_move",
 ])
 
+# Regex for parsing relocating nodes
 RELOCATING_RE = re.compile(r"^([^ ]+) -> [^ ]+ [^ ]+ ([^ ]+)$")
 
 def format_bytes(num_bytes):
+	"""
+	Formats a number into human-friendly byte units (KiB, MiB, etc)
+	"""
 	if num_bytes >= 1024*1024*1024*1024:
 		return "%.2fTiB" % (num_bytes / (1024*1024*1024*1024))
 	if num_bytes >= 1024*1024*1024:
@@ -51,6 +70,9 @@ def format_bytes(num_bytes):
 	return "%dB" % num_bytes
 
 class Plan:
+	"""
+	Main class for planning shard swaps
+	"""
 	def __init__(self, es, box_type, shard_percentage_threshold, node_percentage_threshold):
 		self.es = es
 		self.shard_fraction_threshold = 1 - shard_percentage_threshold / 100
@@ -101,6 +123,10 @@ class Plan:
 		self._sort()
 	
 	def _sort(self):
+		"""
+		Resorts all nodes and the `nodes_by_size` list.
+		Call after modifying a node's shards list.
+		"""
 		for node in self.nodes_by_size:
 			node.resort()
 		self.nodes_by_size.sort(
@@ -108,10 +134,19 @@ class Plan:
 			reverse=True)
 	
 	def plan_step(self):
+		"""
+		Plans a single exchange.
+		
+		Call this once for every exchange you want to do.
+		
+		Returns true if a shard was able to be exchanged, or false if
+		no shards are able to exchange anymore.
+		"""
 		current_pvariance = self.percent_used_variance()
 		
 		for big_node, big_shard in self.find_big_shards():
 			for small_node, small_shard in self.find_small_shards(big_node):
+				# Is the "small" shard actually the smaller of the two?
 				if small_shard.store >= big_shard.store:
 					continue
 				
@@ -132,7 +167,9 @@ class Plan:
 		return False
 	
 	def find_big_shards(self):
-		"Yields shards that ought to be moved, in decreasing priority"
+		"""
+		Yields large shards that ought to be exchanged, with the highest-priority shards first.
+		"""
 		for node in self.nodes_by_size:
 			if abs(self.nodes_by_size[-1].fraction_used - node.fraction_used) < self.node_fraction_threshold:
 				# Big node has a similar percent used than all of the smaller nodes, so there's
@@ -147,6 +184,9 @@ class Plan:
 				yield node, shard
 	
 	def find_small_shards(self, big_node):
+		"""
+		Yields small shards that ought to be exchanged, with the highest-priority shards first.
+		"""
 		for node in reversed(self.nodes_by_size):
 			if node is big_node:
 				# We've met up with the big node. All other nodes will be bigger than it,
@@ -161,6 +201,11 @@ class Plan:
 				yield node, shard
 	
 	def can_exchange_shards(self, node1, node1_shard, node2, node2_shard):
+		"""
+		Checks if two shards can be exchanged, according to the setup rules for the plan, the node's available
+		disk space, and the one-replica-per-rack ES rule.
+		"""
+		# Can't swap a node with itself
 		if node1 is node2:
 			return False
 		
@@ -230,6 +275,9 @@ class Plan:
 		return True
 	
 	def plan_exchange(self, node1, node1_shard, node2, node2_shard):
+		"""
+		Adds move operations to exchange the two shards. Also updates the node's shards list.
+		"""
 		LOG.info("Exchanging shard %s/%s/%s (%s) on node %s (%.2f%%) with %s/%s/%s (%s) on node %s (%.2f%%)",
 			node1_shard.index, node1_shard.shard, node1_shard.prirep, format_bytes(node1_shard.store),
 			node1.name, sum(node.store for node in node1.shards) * 100 / node1.capacity,
@@ -281,6 +329,12 @@ class Plan:
 		return statistics.pvariance(percentage(node) for node in self.nodes_by_size)
 	
 	def exec(self, dry_run=True):
+		"""
+		Executes the operations enqueued with `plan_step`.
+		
+		This submits the operations to Elasticsearch, which will execute them asynchronously.
+		As such, this method returns quickly and without waiting for the moves to finish.
+		"""
 		try:
 			self.es.cluster.reroute(body={"commands": self.operations}, dry_run=dry_run)
 		except TransportError as err:
@@ -334,7 +388,6 @@ Example:
 		if not plan.plan_step():
 			LOG.warn("Could not move anything, stopping early after %d iteration(s)", i+1)
 			break
-	#pprint.pprint(plan.operations)
 	
 	plan.exec(dry_run=not args.execute)
 	if not args.execute:
