@@ -77,10 +77,13 @@ class Plan:
 		self.es = es
 		self.shard_fraction_threshold = 1 - shard_percentage_threshold / 100
 		self.node_fraction_threshold = node_percentage_threshold / 100
+		
+		# Grab node and shard info from ES
 		raw_alloc_infos = es.cat.allocation(format="json", bytes="b")
 		raw_shards = es.cat.shards(format="json", bytes="b")
 		raw_nodes = dict((node["name"], node) for node in es.nodes.info(format="json")["nodes"].values())
 		
+		# Make NodeInfo structs from nodes
 		nodes = {}
 		for alloc_info in raw_alloc_infos:
 			if raw_nodes[alloc_info["node"]]["attributes"].get("box_type") != box_type:
@@ -93,6 +96,7 @@ class Plan:
 				shards=[],
 			)
 		
+		# Fill out NodeInfo's shards list
 		for shard in raw_shards:
 			if shard["state"] == "RELOCATING":
 				match = RELOCATING_RE.match(shard["node"])
