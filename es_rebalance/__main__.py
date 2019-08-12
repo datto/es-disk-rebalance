@@ -14,6 +14,15 @@ LOG = logging.getLogger(__name__)
 class NodeInfo:
 	"""
 	Info about an ES node
+	
+	Fields:
+	
+	* name: str
+	* ip: str
+	* rack: str, rack name of the node for replication awareness
+	* capacity: int, in bytes
+	* shards: list of Shard, usually sorted largest-first. After editing call resort.
+	* used: int, in bytes. Calculated by resort.
 	"""
 	def __init__(self, name, ip, rack, capacity, shards):
 		# Immutable properties
@@ -44,12 +53,14 @@ class NodeInfo:
 		self.shards.sort(key=lambda shard: shard.store, reverse=True)
 		self.used = sum(shard.store for shard in self.shards)
 
+# Shard class
+# Namedtuple since it does not need any methods
 Shard = namedtuple("Shard", [
-	"index",
-	"shard",
-	"prirep",
-	"store",
-	"can_move",
+	"index", # str, index name
+	"shard", # int, stard index
+	"prirep", # str, either "p" for primaries or "r" for replicas
+	"store", # int, size of shard in bytes
+	"can_move", # bool, can we move this shard? Can't be moved if relocating, in a bad state, etc
 ])
 
 # Regex for parsing relocating nodes
@@ -72,6 +83,17 @@ def format_bytes(num_bytes):
 class Plan:
 	"""
 	Main class for planning shard swaps
+	
+	Fields:
+	
+	* es: ES connection
+	* shard_fraction_threshold: float from 0..1, don't consider exchanges of shards whose sizes are within
+	  this fraction of each other.
+	* node_fraction_threshold: float from 0..1, don't consider exchanges between nodes whose percent used
+	  are within this fraction of each other.
+	* operations: list of dicts compatible with ES's reroute command. Pending operations.
+	* nodes_by_size: list of NodeInfo, sorted by percent used largest-first.
+	* moved_stards: set of Shard that have already been moved.
 	"""
 	def __init__(self, es, box_type, shard_percentage_threshold, node_percentage_threshold):
 		self.es = es
@@ -123,7 +145,6 @@ class Plan:
 		self.operations = []
 		self.nodes_by_size = list(nodes.values())
 		self.moved_shards = set()
-		self.shards_by_size = None
 		self._sort()
 	
 	def _sort(self):
@@ -173,6 +194,8 @@ class Plan:
 	def find_big_shards(self):
 		"""
 		Yields large shards that ought to be exchanged, with the highest-priority shards first.
+		
+		Prioritize moving shards off the most full hosts, with the largest shards going first.
 		"""
 		for node in self.nodes_by_size:
 			if abs(self.nodes_by_size[-1].fraction_used - node.fraction_used) < self.node_fraction_threshold:
@@ -190,6 +213,8 @@ class Plan:
 	def find_small_shards(self, big_node):
 		"""
 		Yields small shards that ought to be exchanged, with the highest-priority shards first.
+		
+		Prioritizes the opposite way that find_big_shards does: starts with smallest shards on most free hosts.
 		"""
 		for node in reversed(self.nodes_by_size):
 			if node is big_node:
