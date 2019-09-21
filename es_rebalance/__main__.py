@@ -108,6 +108,8 @@ class Plan:
 		# Make NodeInfo structs from nodes
 		nodes = {}
 		for alloc_info in raw_alloc_infos:
+			if alloc_info["node"] == "UNASSIGNED":
+				continue
 			if raw_nodes[alloc_info["node"]]["attributes"].get("box_type") != box_type:
 				continue
 			nodes[alloc_info["node"]] = NodeInfo(
@@ -138,7 +140,7 @@ class Plan:
 					index=shard["index"],
 					shard=int(shard["shard"]),
 					prirep=shard["prirep"],
-					store=int(shard["store"]),
+					store=int(shard["store"]) if shard["store"] is not None else 0,
 					can_move=can_move,
 				))
 		
